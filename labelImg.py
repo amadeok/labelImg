@@ -8,6 +8,7 @@ import shutil
 import sys
 import webbrowser as wb
 from functools import partial
+from threading import Lock
 
 try:
     from PyQt5.QtGui import *
@@ -47,8 +48,167 @@ from libs.create_ml_io import CreateMLReader
 from libs.create_ml_io import JSON_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
+import threading, win32api, win32gui, time, loge, PySimpleGUI as sg, pyautogui, shutil
+
+
 
 __appname__ = 'labelImg'
+
+
+class CrossDrawingWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setCursor(Qt.CrossCursor)  # Set cursor to crosshair
+        self.initUI()
+
+    def initUI(self):
+        self.setGeometry(100, 100, 400, 400)
+        self.setWindowTitle('Cursor Cross Drawing')
+        self.setMouseTracking(True)  # Enable tracking mouse movements
+        self.cursor_position = None
+
+    def paintEvent(self, event):
+        if self.cursor_position is not None:
+            qp = QPainter(self)
+            qp.setRenderHint(QPainter.Antialiasing)
+            pen = QPen()
+            pen.setColor(QColor(255, 0, 0))  # Red color
+            pen.setWidth(2)
+            qp.setPen(pen)
+            
+            x, y = self.cursor_position
+            qp.drawLine(x, 0, x, self.height())  # Draw a vertical line
+            qp.drawLine(0, y, self.width(), y)  # Draw a horizontal line
+
+    def mouseMoveEvent(self, event):
+        self.cursor_position = event.pos()
+        self.update()  # Redraw the widget
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            print(f'Left-clicked at position: {self.cursor_position}')
+
+
+def to_l(p):
+    return [p.x(), p.y()]
+class ClickHandler(QObject):
+    def __init__(self, widget, parent):
+        super().__init__()
+        self.widget = widget
+        self.widget.installEventFilter(self)
+        self.cropping = False
+        self.points = [None, None]
+        self.win = parent
+
+        import os, cv2
+        self.m = r'F:\all\GitHub\bluetooth_test\runs\detect\train48\weights\best.pt' #'yolov8m.pt'
+        self.model =None
+    
+    def eventFilter(self, obj, event):
+        if event.type() == event.MouseButtonPress:
+            if event.button() == 1:
+                if self.cropping:
+                    if not self.model:
+                        from ultralytics import YOLO
+                        self.model = YOLO(self.m)
+                    if self.points[1] and not self.points[0] or not self.points[0] and not self.points[0]:
+                        self.points[0] = to_l(self.widget.pos)
+                    elif self.points[0] and not self.points[1]:
+                        self.points[1] = to_l(self.widget.pos)
+                    if self.points[0] and self.points[1]:
+                        print("cropped: ", self.points)
+                        self.cropping = False
+                        w_points = self.points[:]
+                        self.points = [None, None]
+                        if w_points[0][0] > w_points[1][0]:
+                            p = w_points[0][0]
+                            w_points[0][0] = w_points[1][0]
+                            w_points[1][0] = p
+                        if  w_points[0][1] > w_points[1][1] :
+                            p =  w_points[0][1]
+                            w_points[0][1] = w_points[1][1]
+                            w_points[1][1] = p
+                            # print("--- > abort crop ")
+                            # return False
+                        win = self.win 
+
+                        im_w = win.image.width()
+                        im_h = win.image.height()
+
+                        x1, y1, x2, y2 = int(w_points[0][0]), int(w_points[0][1]), int(w_points[1][0]), int(w_points[1][1])
+
+                        if x1 < 0: x1 = 0
+                        if x2 > im_w: x2 = im_w
+                        if y1 < 0: y1 = 0
+                        if y2 > im_h: y2 = im_h
+
+                        w, h, switch = x2-x1, y2-y1, 0
+                        if im_w  - x2 > x1:
+                            switch = 1
+                        while 1:
+                            w = x2 - x1
+                            if w % 32 == 0:   break
+                            if switch:  x2-=1
+                            else:  x1+=1
+                            #switch = 1-switch
+                        switch = 0
+                        if im_h  - y2 > y1:
+                            switch = 1
+                        while 1:
+                            h = y2 - y1
+                            if h % 32 == 0:  break
+                            if switch:  y2-=1
+                            else:   y1+=1
+                            #switch = 1-switch
+
+                        base = os.path.dirname(win.file_path)
+                        base_b = base+"_B"
+                        if not os.path.isdir(base_b): os.mkdir(base_b)
+                        bf = os.path.join( base_b,  os.path.basename(win.file_path))
+                        label_n = os.path.basename(win.file_path).split(".")[0] + ".txt"
+                        bf_l = os.path.join( base_b,  label_n)
+                        f_l = os.path.join( base,  label_n)
+
+                        if not os.path.isfile(bf):
+                            win.image.save( bf )
+                        if not os.path.isfile(bf_l) and os.path.isfile(f_l):
+                              shutil.copy(f_l , bf_l )
+                        crop_rect = QRect(int(x1), int(y1), int(w), int(h))  # Adjust coordinates and size as needed
+                        cropped_image = win.image.copy(crop_rect)
+                        assert cropped_image.width() % 32 == 0 and cropped_image.height() % 32 == 0 
+                        cropped_image.save(win.file_path)
+                        #time.sleep(0.1)
+                        frame = cv2.imread(win.file_path)
+                        results = list(self.model(frame , True, conf=0.5))
+                        boxes = results[0].boxes.xywhn.cpu().numpy().astype(float)
+                        ids = results[0].boxes.cls.cpu().numpy().astype(int) #result.boxes.cpu().numpy()
+                        if  len(boxes):
+                            print("writing labels.. ", f_l)
+                            #ret = os.remove(f_l)
+                            #print(os.path.isfile(f_l))
+                            win.open_next_image()
+
+                            with open(f_l, "w") as label_f:
+                                print("---> out f write: ")
+                                for i, box in enumerate(boxes): 
+                                    out_str = f"{ids[i]} {' '.join(str(f) for f in boxes[i])}\n"
+                                    print(out_str, end="")
+
+                                    label_f.write(out_str)
+                                    label_f.flush()
+                            with open(f_l, 'r') as f:
+                                print("--- > read: ")
+                                print(f.read())
+
+                            win.open_prev_image()
+
+                        self.win.borderless_thread.set_vis(0)
+                    print(f'Left Click at {self.points}')
+
+
+            # elif event.button() == 2:
+            #     print('Right Click at ({}, {})'.format(event.x(), event.y()))
+        return super().eventFilter(obj, event)
 
 
 class WindowMixin(object):
@@ -70,18 +230,115 @@ class WindowMixin(object):
         return toolbar
 
 
+class BorderlessWindowThread(threading.Thread):
+    def __init__(self, parent):
+        super().__init__()
+        self.win = parent
+        self.stop = False
+
+    # def border(self, elem):
+    #     return sg.Frame('', [[elem]], background_color='yellow')
+
+
+    def getwin(self, layout, transparent=0):
+        return sg.Window(
+                "Cursor Tracker",
+                layout,
+                no_titlebar=True,  # Remove the title bar to make it borderless
+                keep_on_top=True,  # Keep the window on top of other windows
+                location=(0, 0),  # Initial window location (top-left corner)
+                alpha_channel=0.7,  # Set window transparency (0.0 to 1.0)
+                element_padding=(0, 0),  # Remove padding around the text element
+                transparent_color=sg.theme_background_color() if transparent else None,
+                finalize=True,
+
+            )
+    def set_vis(self, vis):
+        self.vis = vis
+
+    def run(self):
+        sg.theme("DarkGrey5")  # Set the theme
+
+        layout = [[sg.Text("", key="text", font=("Helvetica", 20, "bold"))]]  # Create a layout with an empty Text element
+
+        self.window = self.getwin(layout)
+        self.len = 8000
+        layouts =[ [[sg.Canvas(size=(1, self.len), background_color='white', key='-CANVAS-')]],
+                    [[sg.Canvas(size=(self.len, 1), background_color='white', key='-CANVAS-')]]]
+        self.windows = []
+
+        for x in range(2): 
+            self.windows.append(self.getwin(layouts[x], transparent=1)  )
+        self.set_vis(0)
+        while True:
+            try:
+                ret = QApplication.instance().closingDown()
+                if ret or self.stop :
+                    break
+            except:
+                print("pysimplegui exiting..")
+                break
+            t = win32gui.GetWindowText(win32gui.GetForegroundWindow()).lower()
+            if "labelimg" in t and not "code" in t:
+                self.window.set_alpha(0.85)
+            else:
+                self.window.set_alpha(0)
+            
+                
+            event, values = self.window.read(timeout=50)  # Read events with a timeout
+
+            if event == sg.WIN_CLOSED:
+                break
+
+            x, y = pyautogui.position()  # Get cursor position
+            self.window["text"].update("" if not self.win.lastLabel else self.win.lastLabel.upper())  # Update the text with cursor coordinates
+
+            self.window.move(x + 80, y - 0)  # Adjust the window position to follow the cursor
+            for i in range(2):
+                window = self.windows[i]
+                window.set_alpha(0.7 if self.vis else 0)
+                x_of = self.len//2 if i == 1 else 0
+                y_of =self.len//2 if i == 0 else 0
+                window.move(x - x_of-13, y - y_of-8)   # Adjust the window position to follow the cursor
+
+        self.window.close()
+
+
 class MainWindow(QMainWindow, WindowMixin):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = list(range(3))
+
+    # @pyqtSlot(int)
+    # def update_progress(self, value):
+    #     #print(f"Progress: {value}%")
+    #     self.create_shape()
+    # def eventFilter(self, obj, event):
+    #     print(event)
+    #     return
+    #     if event.type() == QtCore.QEvent.MouseButtonPress:
+    #         if event.button() == QtCore.Qt.LeftButton:
+    #             print(obj.objectName(), "Left click")
+    #         elif event.button() == QtCore.Qt.RightButton:
+    #             print(obj.objectName(), "Right click")
+    #         elif event.button() == QtCore.Qt.MiddleButton:
+    #             print(obj.objectName(), "Middle click")
+    #     return QtCore.QObject.event(obj, event)
 
     def __init__(self, default_filename=None, default_prefdef_class_file=None, default_save_dir=None):
         super(MainWindow, self).__init__()
         self.setWindowTitle(__appname__)
+        self.q_down, self.e_down = False, False
+
+        self.borderless_thread = BorderlessWindowThread(self)
+        self.borderless_thread.start()
+        self.cross = CrossDrawingWidget()
 
         # Load setting in the main thread
         self.settings = Settings()
         self.settings.load()
         settings = self.settings
 
+   #     self.canvas.addWidget(self.ck)
+        self.sorted_index = 0
         self.os_name = platform.system()
 
         # Load string bundle for i18n
@@ -188,6 +445,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.zoomRequest.connect(self.zoom_request)
         self.canvas.lightRequest.connect(self.light_request)
         self.canvas.set_drawing_shape_to_square(settings.get(SETTING_DRAW_SQUARE, False))
+        self.click_handler = ClickHandler(self.canvas, self)
 
         scroll = QScrollArea()
         scroll.setWidget(self.canvas)
@@ -203,6 +461,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.shapeMoved.connect(self.set_dirty)
         self.canvas.selectionChanged.connect(self.shape_selection_changed)
         self.canvas.drawingPolygon.connect(self.toggle_drawing_sensitive)
+        self.canvas.installEventFilter(self.canvas)
 
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
@@ -228,7 +487,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         open_annotation = action(get_str('openAnnotation'), self.open_annotation_dialog,
                                  'Ctrl+Shift+O', 'open', get_str('openAnnotationDetail'))
-        copy_prev_bounding = action(get_str('copyPrevBounding'), self.copy_previous_bounding_boxes, 'Ctrl+v', 'copy', get_str('copyPrevBounding'))
+        copy_prev_bounding = action(get_str('copyPrevBounding'), self.copy_previous_bounding_boxes, 'Alt+B', 'copy', get_str('copyPrevBounding'))
 
         open_next_image = action(get_str('nextImg'), self.open_next_image,
                                  'd', 'next', get_str('nextImgDetail'))
@@ -261,7 +520,7 @@ class MainWindow(QMainWindow, WindowMixin):
         save_as = action(get_str('saveAs'), self.save_file_as,
                          'Ctrl+Shift+S', 'save-as', get_str('saveAsDetail'), enabled=False)
 
-        close = action(get_str('closeCur'), self.close_file, 'Ctrl+W', 'close', get_str('closeCurDetail'))
+        close = action(get_str('closeCur'), self.close_file, 'Ctrl+I', 'close', get_str('closeCurDetail'))
 
         delete_image = action(get_str('deleteImg'), self.delete_image, 'Ctrl+Shift+D', 'close', get_str('deleteImgDetail'))
 
@@ -271,14 +530,20 @@ class MainWindow(QMainWindow, WindowMixin):
                         'Ctrl+L', 'color_line', get_str('boxLineColorDetail'))
 
         create_mode = action(get_str('crtBox'), self.set_create_mode,
-                             'w', 'new', get_str('crtBoxDetail'), enabled=False)
+                             "w", 'new', get_str('crtBoxDetail'), enabled=False)
         edit_mode = action(get_str('editBox'), self.set_edit_mode,
                            'Ctrl+J', 'edit', get_str('editBoxDetail'), enabled=False)
 
         create = action(get_str('crtBox'), self.create_shape,
-                        'w', 'new', get_str('crtBoxDetail'), enabled=False)
+                       "w" , 'new', get_str('crtBoxDetail'), enabled=False)
+        
+
+        # create1 = action(get_str('crtBox'), self.create_shape,
+        #                 '1', 'new', get_str('crtBoxDetail'), enabled=False)
+        
+
         delete = action(get_str('delBox'), self.delete_selected_shape,
-                        'Delete', 'delete', get_str('delBoxDetail'), enabled=False)
+                        ['\\', "delete"], 'delete', get_str('delBoxDetail'), enabled=False)
         copy = action(get_str('dupBox'), self.copy_selected_shape,
                       'Ctrl+D', 'copy', get_str('dupBoxDetail'),
                       enabled=False)
@@ -357,7 +622,7 @@ class MainWindow(QMainWindow, WindowMixin):
         shape_line_color = action(get_str('shapeLineColor'), self.choose_shape_line_color,
                                   icon='color_line', tip=get_str('shapeLineColorDetail'),
                                   enabled=False)
-        shape_fill_color = action(get_str('shapeFillColor'), self.choose_shape_fill_color,
+        shape_fill_color = action(get_str('shapeFillColor'), self.choose_shape_fill_color,# "Shift+3",
                                   icon='color', tip=get_str('shapeFillColorDetail'),
                                   enabled=False)
 
@@ -421,7 +686,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.lastLabel = None
         # Add option to enable/disable labels being displayed at the top of bounding boxes
         self.display_label_option = QAction(get_str('displayLabel'), self)
-        self.display_label_option.setShortcut("Ctrl+Shift+P")
+        self.display_label_option.setShortcut("Shift+2")
         self.display_label_option.setCheckable(True)
         self.display_label_option.setChecked(settings.get(SETTING_PAINT_LABEL, False))
         self.display_label_option.triggered.connect(self.toggle_paint_labels_option)
@@ -503,6 +768,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.restoreState(settings.get(SETTING_WIN_STATE, QByteArray()))
         Shape.line_color = self.line_color = QColor(settings.get(SETTING_LINE_COLOR, DEFAULT_LINE_COLOR))
         Shape.fill_color = self.fill_color = QColor(settings.get(SETTING_FILL_COLOR, DEFAULT_FILL_COLOR))
+        self.t_red = QColor(0, 0, 60, 25)
+        Shape.fill_color = self.fill_color = self.t_red
+        Shape.select_fill_color = self.t_red
+        c = self.fill_color.getRgbF()
         self.canvas.set_drawing_color(self.line_color)
         # Add chris
         Shape.difficult = self.difficult
@@ -538,15 +807,32 @@ class MainWindow(QMainWindow, WindowMixin):
         # Open Dir if default file
         if self.file_path and os.path.isdir(self.file_path):
             self.open_dir_dialog(dir_path=self.file_path, silent=True)
+            
 
     def keyReleaseEvent(self, event):
-        if event.key() == Qt.Key_Control:
+        a = event.key()
+        if a == Qt.Key_Control:
             self.canvas.set_drawing_shape_to_square(False)
+        if a == lo.E:
+            self.e_down = False
+        if a == lo.Q:
+            self.q_down = False
+            
+    #def pagedown(self):
+        #self.focusNextPrevChild(True)
+        # widget = QApplication.focusWidget()
+        # print(widget)
+
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Control:
+        a = event.key()
+        if a == Qt.Key_Control:
             # Draw rectangle if Ctrl is pressed
             self.canvas.set_drawing_shape_to_square(True)
+        if a == lo.E:
+            self.e_down = True
+        if a == lo.Q:
+            self.q_down = True
 
     # Support Functions #
     def set_format(self, save_format):
@@ -705,7 +991,7 @@ class MainWindow(QMainWindow, WindowMixin):
         assert self.beginner()
         self.canvas.set_editing(False)
         self.actions.create.setEnabled(False)
-
+        
     def toggle_drawing_sensitive(self, drawing=True):
         """In the middle of drawing, toggling between modes should be disabled."""
         self.actions.editMode.setEnabled(not drawing)
@@ -748,6 +1034,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def pop_label_list_menu(self, point):
         self.menus.labelList.exec_(self.label_list.mapToGlobal(point))
+
+    def edit_label_partial(self, text):
+        if not self.canvas.editing(): return
+        item = self.current_item()
+        if not item: return
+        item.setText(text)
+        item.setBackground(generate_color_by_text(text))
+        self.set_dirty()
+        self.update_combo_box()
 
     def edit_label(self):
         if not self.canvas.editing():
@@ -968,6 +1263,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # Sync single class mode from PR#106
             if self.single_class_mode.isChecked() and self.lastLabel:
                 text = self.lastLabel
+
             else:
                 text = self.label_dialog.pop_up(text=self.prev_label_text)
                 self.lastLabel = text
@@ -994,10 +1290,76 @@ class MainWindow(QMainWindow, WindowMixin):
             # self.canvas.undoLastLine()
             self.canvas.reset_all_lines()
 
+
+    def find_center(self, points):
+        sum_x = sum(p.x() for p in points)
+        sum_y = sum(p.y() for p in points)
+        center_x = sum_x / len(points)
+        center_y = sum_y / len(points)
+        return QPointF(center_x, center_y)
+
     def scroll_request(self, delta, orientation):
-        units = - delta / (8 * 15)
-        bar = self.scroll_bars[orientation]
-        bar.setValue(int(bar.value() + bar.singleStep() * units))
+        
+        if lo.ikp(lo.S):
+            it = self.label_list.item(0)
+            #s = it.whatsThis()
+            items = [self.label_list.item(i) for i in range(self.label_list.count())]
+            items2 = [ [self.items_to_shapes[item], item] for item in items]
+            centers = [[self.find_center(it[0].points), it[1]] for it in items2 ] 
+            sorted_points = sorted(centers, key=lambda elem: elem[0].y())
+            sorted_points2 = [sorted_points[0]] if len(sorted_points) else []
+            ind = 0
+            while len(sorted_points2) != len(sorted_points):
+                cur_it = sorted_points2[ind]
+                min_ = 9999999
+                closest = None
+                for elem in sorted_points:
+                    dist  = QLineF(elem[0], cur_it[0]).length()
+                    if dist < min_ and not elem in sorted_points2 and elem[0] != cur_it[0]:
+                        closest = elem
+                        min_ = dist
+                sorted_points2.append(closest)
+                ind+=1
+            
+
+            count = self.label_list.count()
+            if count:
+                item = self.current_item()
+                self.sorted_index += (1 if delta < 0 else -1)
+                if self.sorted_index >= count:
+                    self.sorted_index = count-1
+                elif self.sorted_index < 0:
+                    self.sorted_index = 0
+                #print(delta)
+                x_bar = self.scroll_bars[Qt.Horizontal]
+                y_bar = self.scroll_bars[Qt.Vertical]
+                
+                item = sorted_points2[self.sorted_index]
+                if item:
+                    iitem = self.items_to_shapes[item[1]]
+                    w, h  = self.image.width(), self.image.height()
+                    bwm, bhm  = x_bar.maximum(), y_bar.maximum()
+
+                    ix = iitem.points[2 if item[0].x() > w//2 else 0].x()
+                    factor = w / (ix+0.00001) # item[1].x()
+                    xval = bwm /factor
+                    x_bar.setValue(int(xval))
+
+                    print(f"factor  {round(factor, 2):5} | w:  {w:5} | bwm: {bwm:5} | itemx: {iitem.points[0].x():5} | xval {round(xval, 2):5}")
+                    iy = iitem.points[2 if item[0].y() > h//2 else 0].y()
+                    factor = h / (iy+0.00001) # item[1].x()
+                    yval = bhm /factor
+                    y_bar.setValue(int(yval))
+        
+                self.label_list.setCurrentItem(item[1])
+                #self.label_list.item(index).setSelected(True)
+        else:
+            units = - delta / (8 * 15)
+            bar = self.scroll_bars[orientation]
+            bar.setValue(int(bar.value() + bar.singleStep() * units))
+        
+        #self.canvas.select_shape()
+        
 
     def set_zoom(self, value):
         self.actions.fitWidth.setChecked(False)
@@ -1011,6 +1373,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.set_zoom(self.zoom_widget.value() + increment)
 
     def zoom_request(self, delta):
+        #print("zoom ", self.zoom_widget.value())
+
         # get the current scrollbar positions
         # calculate the percentages ~ coordinates
         h_bar = self.scroll_bars[Qt.Horizontal]
@@ -1047,7 +1411,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # zoom in
         units = delta // (8 * 15)
-        scale = 10
+        scale = 45
         self.add_zoom(scale * units)
 
         # get the difference in scrollbar values
@@ -1160,10 +1524,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.show_bounding_box_from_annotation_file(self.file_path)
 
             counter = self.counter_str()
-            self.setWindowTitle(__appname__ + ' ' + file_path + ' ' + counter)
+            st = __appname__ + ' ' + file_path + ' ' + counter
+            self.setWindowTitle(f" {st:150}  |  {self.lastLabel.upper() if self.lastLabel else ''}")
 
             # Default : select last item if there is at least one item
-            if self.label_list.count():
+            if self.label_list.count() and 0:
                 self.label_list.setCurrentItem(self.label_list.item(self.label_list.count() - 1))
                 self.label_list.item(self.label_list.count() - 1).setSelected(True)
 
@@ -1246,6 +1611,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if not self.may_continue():
             event.ignore()
         settings = self.settings
+        self.borderless_thread.stop = True
         # If it loads images from dir, don't load it at the beginning
         if self.dir_name is None:
             settings[SETTING_FILENAME] = self.file_path if self.file_path else ''
@@ -1594,6 +1960,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.canvas.update()
             self.set_dirty()
 
+    # def mousePressEvent(self, event):
+    #     print(event)
     def copy_shape(self):
         if self.canvas.selected_shape is None:
             # True if one accidentally touches the left mouse button before releasing
@@ -1665,6 +2033,16 @@ class MainWindow(QMainWindow, WindowMixin):
     def toggle_paint_labels_option(self):
         for shape in self.canvas.shapes:
             shape.paint_label = self.display_label_option.isChecked()
+        val = self.zoom_widget.value()
+        h_bar = self.scroll_bars[Qt.Horizontal]
+        v_bar = self.scroll_bars[Qt.Vertical]
+        h_val = h_bar.value()
+        v_val = v_bar.value()
+        self.open_next_image()
+        self.open_prev_image()
+        self.zoom_widget.setValue(val)
+        h_bar.setValue(h_val)
+        v_bar.setValue(v_val)
 
     def toggle_draw_square(self):
         self.canvas.set_drawing_shape_to_square(self.draw_squares_option.isChecked())
@@ -1712,11 +2090,187 @@ def get_main_app(argv=None):
     win.show()
     return app, win
 
+stop = False
+import pyttsx3, queue
+speak_queue = queue.Queue()
+lo = loge.loge.loge()
+import cv2
+
+
+def ch(win):
+    global stop
+    
+    while 1:
+        # try:
+        #     QApplication.instance().closingDown()
+        # except:
+        #     break
+        time.sleep(0.1)
+        t = win32gui.GetWindowText(win32gui.GetForegroundWindow()).lower()
+        if   "labelimg" in t and not "code" in t:
+            newl = ""
+            n = 0
+            for n in range(len(arr)):
+                if lo.ikp(lo.v[str(n)]):
+                    
+                    if lo.ikp(lo.Q):
+                        newl = f"d{arr[n]}"
+                    elif lo.ikp(lo.E):
+                        newl = f"{arr[n]}_h"
+                    else:
+                        newl = f"{arr[n]}"
+                    print(n, newl)
+                    #speak_queue.put(newl)
+                    file_p = "" if win.file_path == None else win.file_path
+                    p1 = f"{__appname__} {file_p} {win.counter_str()}"
+                    win.setWindowTitle(f" {p1:150}  |  {win.lastLabel.upper() if win.lastLabel else ''}")
+                    #win.create_shape()
+                    #win.worker.progress.emit(32)  
+                    
+                    break
+            if len(newl):
+                if newl in win.label_hist:
+                    #with Lock():
+                    win.lastLabel = newl
+                    time.sleep(0.3)
+                else:
+                    print("ERROR ", newl, " NOT FOUND ", win.label_hist)
+            if lo.ikp(220) :
+                print(win.file_path)
+                input_path = win.file_path
+                crop_rect = QRect(352, 0, win.image.width()-352, win.image.height())  # Adjust coordinates and size as needed
+                cropped_image = win.image.copy(crop_rect)
+                cropped_image.save(win.file_path)
+                assert cropped_image.width() % 32 == 0 and cropped_image.height() % 32 == 0 
+
+
+# class Worker(QObject):
+#     finished = pyqtSignal()  # Signal emitted when the work is finished
+#     progress = pyqtSignal(int)  # Signal emitted to report progress
+
+#     def __init__(self):
+#         super().__init__()
+
+#     def do_work(self):
+#         while 1:
+#             self.ch(self.win)
+#         for i in range(1, 101):
+#             time.sleep(0.1)  # Simulate some work
+#             self.progress.emit(i)  # Emit progress signal
+#         self.finished.emit()  # Emit finished signal
 
 def main():
     """construct main app and run it"""
     app, _win = get_main_app(sys.argv)
+
+    # _win.worker_thread = QThread()
+    # _win.worker = Worker()
+    # _win.worker.win = _win
+    # _win.worker.moveToThread(_win.worker_thread)
+    # _win.worker_thread.started.connect(_win.worker.do_work)
+    # _win.worker.finished.connect(_win.worker_thread.quit)
+    # _win.worker.finished.connect(_win.worker.deleteLater)
+    # _win.worker_thread.finished.connect(_win.worker_thread.deleteLater)
+    # _win.worker.progress.connect(_win.update_progress)
+    # _win.worker_thread.start()
+
+    arr_ = [None, "bo", "fbo", "be", "fbe", "t"]
+    def task(val, mod=""):
+        #print("val", val, "mod", mod)
+ 
+        if mod == "H":
+            newl = f"{arr_[val]}_h"
+        elif mod == "d":
+            newl = f"d{arr_[val]}"
+        else: 
+            newl = arr_[val]
+        win = _win
+        item = _win.current_item()
+        if item:
+            _win.edit_label_partial(newl)
+        else:
+            win.lastLabel = newl
+            file_p = "" if win.file_path == None else win.file_path
+            p1 = f"{__appname__} {file_p} {win.counter_str()}"
+            win.setWindowTitle(f" {p1:150}  |  {win.lastLabel.upper() if win.lastLabel else ''}")
+            win.create_shape()
+        #win.worker.progress.emit(32)  
+
+        print(newl)
+
+    def f1(): task(1)
+    def f1d(): task(1, "d")
+    def f1h(): task(1, "H")
+
+    def f2(): task(2)
+    def f2d(): task(2, "d")
+    def f2h(): task(2, "H")
+
+    def f3(): task(3)
+    def f3d(): task(3, "d")
+    def f3h(): task(3, "H")
+
+    def f4(): task(4)
+    def f4d(): task(4, "d")
+    def f4h(): task(4, "H")
+
+    def f5(): task(5)
+    def f5d(): task(5, "d")
+    def f5h(): task(5, "H")
+
+    arr = [f1, f2, f3, f4, f5]
+    arrd = [f1d, f2d, f3d, f4d, f5d]
+    arrh = [f1h, f2h, f3h, f4h, f5h]
+    lk = ["Z", 'X', 'C', 'V', 'B']
+
+    def short(key, fun):
+        s = "+".join( list(key))
+        action = QAction("Open", _win)
+        action.setShortcut(QKeySequence(s))
+        action.triggered.connect(fun)
+        shortcut = QShortcut(s, _win)
+        shortcut.activated.connect(fun)
+
+    for i in range(0, 5):
+        short(lk[i], arr[i])
+        short([ "Shift", lk[i]], arrd[i])
+        short([ "Ctrl", lk[i]], arrh[i])
+    def crop():
+        #widget = QApplication.focusWidget()
+        _win.borderless_thread.set_vis(1)
+        _win.click_handler.cropping = True
+        print("cropping..")
+    def open_txt():
+        _win.scroll_loop = True
+        print("opening label file")
+        label_n = _win.file_path.split(".")[0] + ".txt"
+        os.startfile(label_n)        
+
+    #short(["Shift", "3"], _win.choose_shape_fill_color)
+    short([ "Ctrl", "w"], crop )
+    short([ "f4"], open_txt )
+
+
+    def speak_loop():
+        engine = pyttsx3.init()
+        voices = engine.getProperty('voices')
+        for voice in voices:
+            print(f"Voice: {voice.name}")
+        engine.setProperty('rate', 70)    # Speed percent (can go over 100)
+
+        while 1:
+            a = speak_queue.get()
+            #for c in a:
+            engine.say(a)
+            engine.runAndWait()
+            
+    t = threading.Thread(target=speak_loop, args=())
+    #t.start()
+    #threading.Thread(target=ch, args=(_win, )).start()
     return app.exec_()
+
 
 if __name__ == '__main__':
     sys.exit(main())
+    stop = 1
+

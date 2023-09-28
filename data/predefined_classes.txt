@@ -1,15 +1,15 @@
-dog
-person
-cat
-tv
-car
-meatballs
-marinara sauce
-tomato soup
-chicken noodle soup
-french onion soup
-chicken breast
-ribs
-pulled pork
-hamburger
-cavity
+bo
+bo_h
+fbo
+fbo_h
+be
+be_h
+fbe
+fbe_h
+t
+t_h
+dbo
+dbe
+dfbo
+dfbe
+dt

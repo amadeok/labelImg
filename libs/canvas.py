@@ -38,6 +38,7 @@ class Canvas(QWidget):
         super(Canvas, self).__init__(*args, **kwargs)
         # Initialise local state.
         self.mode = self.EDIT
+
         self.shapes = []
         self.current = None
         self.selected_shape = None  # save the selected shape here
@@ -68,6 +69,13 @@ class Canvas(QWidget):
 
         # initialisation for panning
         self.pan_initial_pos = QPoint()
+        # p = self.palette()
+        # p.setColor(self.backgroundRole(), Qt.red)
+        # self.setPalette(p)
+        w = self
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setStyleSheet('background-color: black;')
+        
 
     def set_drawing_color(self, qcolor):
         self.drawing_line_color = qcolor
@@ -111,7 +119,8 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, ev):
         """Update line with last point and current coordinates."""
         pos = self.transform_pos(ev.pos())
-
+        self.pos =  self.transform_pos2(ev.pos())
+        #print(self.pos, ev)
         # Update coordinates in status bar if image is opened
         window = self.parent().window()
         if window.file_path is not None:
@@ -518,6 +527,7 @@ class Canvas(QWidget):
         Shape.label_font_size = self.label_font_size
         for shape in self.shapes:
             if (shape.selected or not self._hide_background) and self.isVisible(shape):
+               # print(shape.select_fill_color.getRgbF())
                 shape.fill = shape.selected or shape == self.h_shape
                 shape.paint(p)
         if self.current:
@@ -557,8 +567,13 @@ class Canvas(QWidget):
     def transform_pos(self, point):
         """Convert from widget-logical coordinates to painter-logical coordinates."""
         return point / self.scale - self.offset_to_center()
-
-    def offset_to_center(self):
+    def transform_pos2(self, point):
+        """Convert from widget-logical coordinates to painter-logical coordinates."""
+        off =  self.offset_to_center(0)
+        sc = point / self.scale
+        return sc  - off
+    
+    def offset_to_center(self, center=1):
         s = self.scale
         area = super(Canvas, self).size()
         w, h = self.pixmap.width() * s, self.pixmap.height() * s
