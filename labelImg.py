@@ -1340,6 +1340,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     w, h  = self.image.width(), self.image.height()
                     bwm, bhm  = x_bar.maximum(), y_bar.maximum()
 
+
                     ix = iitem.points[2 if item[0].x() > w//2 else 0].x()
                     factor = w / (ix+0.00001) # item[1].x()
                     xval = bwm /factor
