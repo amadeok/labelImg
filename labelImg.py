@@ -1351,8 +1351,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     factor = h / (iy+0.00001) # item[1].x()
                     yval = bhm /factor
                     y_bar.setValue(int(yval))
-        
-                self.label_list.setCurrentItem(item[1])
+
+                    self.label_list.setCurrentItem(item[1])
                 #self.label_list.item(index).setSelected(True)
         else:
             units = - delta / (8 * 15)

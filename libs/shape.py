@@ -130,6 +130,19 @@ class Shape(object):
                         min_y += min_y_label
                     painter.drawText(int(min_x), int(min_y), self.label)
 
+                    # val = max(1, int(round(2.0 / self.scale*3)))
+                    # pen.setWidth(val)
+                    # painter.setPen(pen)
+                    font.setPointSize(self.label_font_size//3)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    w = self.points[2].x()-self.points[0].x()
+                    h = self.points[2].y()-self.points[0].y()
+                    a = w*h
+                    painter.drawText(int(min_x+37), int(min_y-25), f"{int(a)} {int(w)}x{int(h)}" )
+
+
+
             if self.fill:
                 color = self.select_fill_color if self.selected else self.fill_color
                 painter.fillPath(line_path, color)
